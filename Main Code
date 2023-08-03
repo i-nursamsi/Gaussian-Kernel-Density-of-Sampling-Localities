@@ -1,0 +1,194 @@
+# 
+#----------------------------------------------------------
+## Name:  Gaussian Kernel Density of Sampling Localities
+# ArcGIS Version:   Pro 1.0-2.x
+# Python Version:   3.6
+# Author: Ilyas Nursamsi
+# Last revision: 18/7/2022
+#-------------------------------------------------------------
+import arcpy, csv, sys, string, os, glob, numpy, arcgisscripting
+from arcpy import env
+from arcpy.sa import *
+arcpy.env.overwriteOutput = True
+gp = arcgisscripting.create()
+
+scriptPath = sys.path[0]
+infileShp = sys.argv[1]
+outFileName = sys.argv[2]
+outFolder = sys.argv[3]
+inRaster = sys.argv[4]
+SearchDIS = sys.argv[5]
+
+OutASCII = outFolder + "\\" + outFileName + ".asc"
+OutShape1 = outFolder + "/" + outFileName + "temp2.shp"
+ConstRas2 = outFolder + "/" + "consTemp2"
+ConstRas3 = outFolder + "/" + "consTemp3"
+ConstRas4 = outFolder + "/" + "consTemp4"
+outRaster2= outFolder + "/" + "reclass"
+OutShape2 = outFolder + "/" + outFileName + "temp3.shp"
+OutShape3 = outFolder + "/" + outFileName + "temp4.shp"
+
+gp.AddMessage("...setting up environment")
+arcpy.env.mask = inRaster
+CELLV = arcpy.GetRasterProperties_management (inRaster,"CELLSIZEX")
+gp.AddMessage(CELLV)
+gp.AddMessage(SearchDIS)
+sr=arcpy.Describe(inRaster).spatialReference
+srUse=sr.factoryCode
+srName=sr.Name
+arcpy.env.extent = inRaster
+arcpy.env.cellSize = inRaster
+arcpy.env.mask = inRaster
+gp.AddMessage("Environmental Cell Size: " + str(arcpy.env.cellSize))
+gp.AddMessage("Projection in: " + str(srName))
+if srUse==0:
+    gp.AddMessage("Please define the projection in"+ str(inRaster))
+    del gp
+if float(str(CELLV)) > float(SearchDIS):
+    gp.AddMessage("Please increase search distance. The search distance "+ str(SearchDIS)+ " must be greater than the cell size: "+ str(CELLV))
+    del gp
+    
+gp.AddMessage("...creating a mask of MaxEnt extent")
+
+#Create a constant Raster for landscape
+arcpy.gp.Slice_sa(inRaster,ConstRas2 ,"1","EQUAL_INTERVAL","0")
+arcpy.CopyRaster_management(ConstRas2,ConstRas3,"#","#","#","NONE","NONE","#")
+arcpy.env.extent = inRaster
+gp.AddMessage("...calculating spatial density of occurrence localities")
+
+#Delete Redundant points
+RasTemp= outFolder+ "/tempRas"
+arcpy.PointToRaster_conversion(infileShp,"FID",RasTemp,"MOST_FREQUENT","NONE",CELLV)
+arcpy.Mosaic_management(RasTemp,ConstRas2,"LAST","FIRST","#","#","NONE","0","NONE")
+
+#arcpy.CalculateStatistics_management(ConstRas2,"1","1","#","SKIP_EXISTING","#")
+RasMax= arcpy.GetRasterProperties_management(ConstRas2, "MAXIMUM")
+RasMaxV= float(str(RasMax))
+RasMaxVP=float(RasMaxV + 1)
+ReclassFields= ("0 1 NoData;1"+ str(RasMaxVP) + " 1")
+gp.AddMessage("Reclassify settings: "+ReclassFields)
+arcpy.gp.Reclassify_sa(ConstRas2,"Value",ReclassFields,outRaster2,"DATA")
+arcpy.RasterToPoint_conversion(outRaster2,OutShape1,"Count")
+
+####create pts for extent
+dsc=arcpy.Describe(inRaster)
+sr=dsc.SpatialReference 
+ext=dsc.Extent 
+
+extF=arcpy.Point(ext.XMin,ext.YMin,ext.XMax,ext.YMax)
+xmin = dsc.extent.XMin
+ymin = dsc.extent.YMin
+xmax = dsc.extent.XMax
+ymax = dsc.extent.YMax
+framespatialRef = dsc.spatialReference
+                
+coords = [xmin,ymin],[xmax,ymin],[xmax,ymax],[xmin, ymax]
+point = arcpy.Point()
+array = arcpy.Array()
+                
+for coord in coords:
+    point.X = coord[0]
+    point.Y = coord[1]
+    array.append(point)
+combin=str(OutShape1)+";"+str(OutShape2)
+polygon = arcpy.Polygon(array, framespatialRef)
+arcpy.FeatureVerticesToPoints_management(polygon,OutShape2,"ALL")
+arcpy.Merge_management(combin,OutShape3,"""#""")
+
+
+###CreateKernelDensity
+RasTemp2= outFolder+ "/tempRas2.tif"
+RasTemp3= outFolder+ "/tempRas3.tif"
+RasTemp4= outFolder+ "/tempRas4.tif"
+#arcpy.extent = inRaster
+arcpy.gp.KernelDensity_sa(OutShape3,"NONE",RasTemp2,CELLV,SearchDIS,"SQUARE_MAP_UNITS")
+arcpy.gp.Times_sa(RasTemp2,SearchDIS,RasTemp4)
+arcpy.gp.Times_sa(RasTemp4,SearchDIS,RasTemp3)
+
+###Add one to bias file
+ConstRas1= outFolder + "/" + "consTemp"
+arcpy.gp.Plus_sa(RasTemp3,"1",ConstRas1)
+arcpy.gp.Plus_sa(ConstRas1,ConstRas3,ConstRas4)
+
+#save_as_ascii
+arcpy.RasterToASCII_conversion(ConstRas4,OutASCII)
+
+import datetime
+#create table of inputs into SDMtoolbox
+#change outFolder if needed, out file if needed, and inputs names
+#NOTE: If script contains a "glob" n- write the first occured of the glob as: + str(globNameHere)+ "\n" + 
+newLine = ""
+file = open(outFolder+"/"+outFileName+".SDMtoolboxInputs", "w")
+file.write(newLine)
+file.close()
+addlineH=str(datetime.datetime.now())+ "\n" + "Input Parameters \n" + "In ShapeFile: " + str(infileShp) + " \n" + "Outfile Name: "+str(outFileName)+ "\n" + "Output Folder: " +str(outFolder) + " \n" + "Climate Data: "+ str(inRaster)+ " \n" + "Sampling Bias Distance: "+ str(SearchDIS)
+filedataZ=""
+###special for 'GRID' function
+#rasters=gp.listrasters("", "ALL")
+#raster= Rasters.next
+#while raster:
+#    print raster
+#    newLineR =str(raster)+ ", "+filedataZ
+#    filedataZ=newLineR
+#    raster = rasters.next()
+#END of special for 'GRID' function
+file = open(outFolder+"/"+outFileName+".SDMtoolboxInputs", "r")
+filedata = file.read()
+file.close()
+#DELETE +"\nRasters input: "
+newLine =addlineH+"\nRasters input: "+filedataZ+filedata
+file = open(outFolder+"/"+outFileName+".SDMtoolboxInputs", "w")
+file.write(newLine)
+file.close()
+gp.AddMessage("*******************************************")
+gp.AddMessage("Table of inputs were output: "+outFolder+"\ExtractbyMask.SDMtoolboxInputs")
+#####step1_change_output_name_appropriately. For example: outFolder+"/ExtractByMask.SDMtoolboxInputs". If fixed name leave within ""; if calling user input: "/"+gridName+".SDMtoolboxInputs" (CHANGING gridName to name input)
+###change 'outFolder' to match outfolder sytax in focal script 
+####step3_change inputs to match script Line:9 (from top of python script
+###step4 paste at bottom before file deletes
+
+arcpy.Delete_management(RasTemp)
+arcpy.Delete_management(RasTemp2)
+arcpy.Delete_management(RasTemp3)
+arcpy.Delete_management(RasTemp4)
+arcpy.Delete_management(OutShape1)
+arcpy.Delete_management(ConstRas1)
+arcpy.Delete_management(ConstRas2)
+arcpy.Delete_management(ConstRas3)
+arcpy.Delete_management(ConstRas4)
+arcpy.Delete_management(outRaster2)
+arcpy.Delete_management(OutShape2)
+arcpy.Delete_management(OutShape3)
+#arcpy.Delete_management(OutShape4)
+
+#gp.AddMessage("Finished successfully")
+
+#add feature to map
+outName = os.path.split(OutASCII)[1]
+#mxd = arcpy.mapping.MapDocument("CURRENT")
+#df = arcpy.mapping.ListDataFrames(mxd)[0]
+#addLayer = arcpy.mapping.Layer(OutASCII)
+#arcpy.mapping.AddLayer(df, addLayer, "AUTO_ARRANGE")
+p = arcpy.mp.ArcGISProject("CURRENT")
+m = p.listMaps()[0]
+scriptPath = sys.path[0]
+scriptPath=scriptPath+"\\Scripts\\MaxEnt.lyrx"
+sys.path.insert(1, scriptPath)
+
+
+#addLayer = m.addDataFromPath(OutASCII)
+addLayer1 = (outFolder + "\\" + outFileName + ".asc")
+#m.addLayer(addLayers, "AUTO_ARRANGE")
+updatedLayer = arcpy.management.ApplySymbologyFromLayer(OutASCII, scriptPath, None, "UPDATE")
+arcpy.SaveToLayerFile_management(updatedLayer, addLayer1)
+gp.AddMessage(addLayer1)
+addLayer=m.addDataFromPath(addLayer1[:-4]+".lyrx")
+
+
+
+
+
+
+
+
+
